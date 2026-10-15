@@ -265,6 +265,8 @@ def get_already_calculated_reynolds(name, flapx, flapy, flapang, mach):
 
 def get_xfoil_data_no_flap_interpolation(name, flapx, flapy, flapang, reynolds, mach):  # interpolates between reynolds numbers if within tolerance
     available = get_already_calculated_reynolds(name, flapx, flapy, flapang, mach)
+    if available == []:
+        return get_xfoil_data_no_interpolation(name, flapx, flapy, flapang, reynolds, mach)
     
     if reynolds < available[0]:
         if available[0] / reynolds > REYNOLDS_MAX_INTERPOLATION_RATIO:
@@ -364,6 +366,90 @@ def add_vectors(vec1, vec2):
     for i in range(0, len(vec1)):
         res.append(vec1[i] + vec2[i])
     return res
+
+def evaluate(string, variables=None):
+    if variables != None:
+        changed = True
+        count = 0
+        while changed:
+            changed = False
+            for var in variables:
+                count += 1
+                if var[0] in string:
+                    string = string.replace(var[0], var[1])
+                    changed = True
+                if count > 50:
+                    print("ERROR: recustive variables")
+                    return 0
+    
+    if " " in string:
+        string = string.replace(" ", "")
+
+    if "**" in string:
+        string = string.replace("**", "^")
+
+    if string == "":
+        return 0
+    
+    try: return float(string)
+    except: pass
+
+    if "(" in string:
+        start = string[0:string.find("(")]
+        sub = ""
+        depth = 1
+        string = string[string.find("(")+1 :]
+        while depth != 0 and string != "":
+            if string[0] == "(":
+                depth += 1
+            elif string[0] == ")":
+                depth -= 1
+
+            if depth != 0:
+                sub += string[0]
+            string = string[1:]
+
+        return evaluate(start + str(evaluate(sub)) + string)
+
+    elif "+" in string or "-" in string:
+        loc = -1
+        addsub = 1 # 1 for addition, -1 for subtraction
+        if "+" in string:
+            loc = string.rfind("+")
+        if "-" in string:
+            if string.rfind("-") > loc:
+                addsub = -1
+                loc = string.rfind("-")
+
+        return evaluate(string[0:loc]) + addsub * evaluate(string[loc+1:])
+
+    elif "*" in string or "/" in string or "%" in string:
+        loc = -1
+        operator = ""
+        if "*" in string:
+            loc = string.rfind("*")
+            operator = "*"
+        if "/" in string:
+            if string.rfind("/") > loc:
+                operator = "/"
+                loc = string.rfind("/")
+        if "%" in string:
+            if string.rfind("%") > loc:
+                operator = "%"
+                loc = string.rfind("%")
+
+        if operator == "/":
+            return evaluate(string[0:loc]) / evaluate(string[loc+1:])
+        elif operator == "*":
+            return evaluate(string[0:loc]) * evaluate(string[loc+1:])
+        return evaluate(string[0:loc]) % evaluate(string[loc+1:])
+
+    elif "^" in string:
+        loc = string.find("^")
+        return evaluate(string[0:loc]) ** evaluate(string[loc+1:])
+
+    return 0
+
 
 class AeroElement:
     def __init__(self, name, chord, incidence, width, flapx, flapy, flapang, x, y, z):
@@ -519,9 +605,14 @@ class MassElement:
 
 
 class StaticModel:
-    def __init__(self):
-        self.model_diagram_fig = plt.figure(figsize=(12,10), layout="constrained")
-        self.model_diagram = self.model_diagram_fig.add_subplot(projection = "3d")
+    def __init__(self, fig=None):
+        if fig == None:
+            self.model_diagram_fig = plt.figure(figsize=(12,10), layout="constrained")
+            self.model_diagram = self.model_diagram_fig.add_subplot(projection = "3d")
+        else:
+            self.model_diagram_fig = fig[0]
+            self.model_diagram = fig[1]
+        
         self.aeroElements = []
         self.massElements = []
         self.clear_model_diagram()
@@ -530,6 +621,9 @@ class StaticModel:
         self.cg = [0, 0, 0]
         self.mass = 0
         self.force = [0, 0, 0]
+
+    def get_fig(self):
+        return [self.model_diagram_fig, self.model_diagram]
         
 
     def clear_model_diagram(self):
@@ -691,9 +785,73 @@ class StaticModel:
         return (a1 + a2) / 2
             
 
-        
+class DynamicWing:
+    def __init__(self, profile, flapx, flapy, flapang, span, chordEq, dihedralEq, sweepEq, twistEq, reflect, x0, y0, z0):
+        self.profile = profile
+        self.flapx = flapx
+        self.flapy = flapy
+        self.flapang = flapang
+        self.span = span
+        self.chordEq = chordEq
+        self.dihedralEq = dihedralEq
+        self.sweepEq = sweepEq
+        self.twistEq = twistEq
+        self.reflect = reflect
+        self.x0 = x0
+        self.y0 = y0
+        self.z0 = z0
 
-    
+    def compile(self, numElements, variables):
+        elements = []
+        span = evaluate(self.span, variables)
+        for i in range(0, numElements):
+            dy = i * span / numElements
+            var = variables.copy()
+            var.append(["y", str(dy)])
+            if self.reflect:
+                dy = -dy
+            flapx = evaluate(self.flapx, var)
+            flapy = evaluate(self.flapy, var)
+            flapang = evaluate(self.flapang, var)
+            chord = evaluate(self.chordEq, var)
+            x = self.x0 + evaluate(self.sweepEq, var)
+            y = self.y0 + dy
+            z = self.z0 + evaluate(self.dihedralEq, var)
+            incidence = evaluate(self.twistEq, var)
+            
+            elements.append(AeroElement(self.profile, chord, incidence, span / numElements, flapx, flapy, flapang, x, y, z))
+            
+        return elements
+
+class DynamicMass:
+    def __init__(self, mass, x, y, z):
+        self.mass = mass
+        self.x = x
+        self.y = y
+        self.z = z
+
+    def compile(self, variables):
+        x = evaluate(self.x, variables)
+        y = evaluate(self.y, variables)
+        z = evaluate(self.z, variables)
+        mass = evaluate(self.mass, variables)
+        return MassElement(mass, x, y, z)
+        
+class DynamicModel:
+    def __init__(self):
+        self.variables = []
+        self.wings = []
+        self.masses = []
+        self.fig = None
+
+    def compile(self, elementsPerWing):
+        static = StaticModel(fig = self.fig)
+        self.fig = static.get_fig()
+        for wing in self.wings:
+            static.aeroElements.extend(wing.compile(elementsPerWing, self.variables))
+        for mass in self.masses:
+            static.massElements.append(mass.compile(self.variables))
+        return static
 
 
 
@@ -702,12 +860,15 @@ class StaticModel:
 
 
 # testing plots:
+
+"""
 test = StaticModel()
 
 width = 0.1
 
-test.massElements.append(MassElement(1.8, -0.1, width*10, 0))
-test.massElements.append(MassElement(1.8, -0.1, -width*10, 0))
+test.massElements.append(MassElement(2, -0.1, width*10, 0))
+test.massElements.append(MassElement(2, -0.1, -width*10, 0))
+
 
 for i in range(0, 15):
     #(name, chord, incidence, width, flapx, flapy, flapang, x, y, z)
@@ -721,15 +882,36 @@ for i in range(0, 6):
     a = AeroElement("NACA4412", 0.2, -2, width, 0.8, 0.5, 0, 1, -(i+0.5)*width, 0)
     a.inverted = True
     test.aeroElements.append(a)
+"""
+
+# dynamic model test
+
+dynamic = DynamicModel()
+
+dynamic.variables = [
+    ["span", "1.5"],
+    ["dihedralRatio", "1/8"],
+    ["sweepRatio", "1/3"],
+    ["twist", "5"]
+    ]
+
+#                                  profile, flapx, plapy,    flapang,       span,      chordEq,       dihedralEq,           sweepEq,            twistEq,         reflect, x0, y0, z0)
+dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", False, 0, 0.2, 0))
+dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", True, 0, -0.2, 0))
+
+dynamic.masses.append(DynamicMass("1", "0.3", "span/4", "0"))
+dynamic.masses.append(DynamicMass("1", "0.3", "-span/4", "0"))
+
+test = dynamic.compile(30)
 
 test.clear_model_diagram()
 test.display_airfoils()
 
-airspeed = 10
-#for AoA in range(-5, 5):
-#    test.update_everything(AoA, airspeed, 0)
-#    test.redraw_model_diagram()
 
+
+# acceleration & AoA convergence tests:
+
+airspeed = 10
 
 for acc in range(0, 20):
     print("target a =", acc, "m/s^2\tAoA =", test.solve_AoA(airspeed, 0, acc, fixPitch = False), "°\ta =", round(test.force[2]/test.mass, 5), "m/s^2")
