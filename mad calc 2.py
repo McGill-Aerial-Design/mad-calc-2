@@ -621,6 +621,7 @@ class StaticModel:
         self.cg = [0, 0, 0]
         self.mass = 0
         self.force = [0, 0, 0]
+        self.moment = [0, 0, 0]
 
     def get_fig(self):
         return [self.model_diagram_fig, self.model_diagram]
@@ -744,12 +745,16 @@ class StaticModel:
         # will fail if stalled when aircraft incidence is 0
         # but it would be a really funky design if it was stalled then but not at other angles
         # so I don't care
+
+        if tolerance == 0:
+            print("\nTolerance in solve_AoA() set to 0, will never converge")
         
         self.update_everything(0, airspeed, pathAngle)
         a1 = 0
         a2 = 0
         
         while self.force[2] > self.mass * acc:
+            a2 = a1
             a1 -= 1
             if fixPitch: self.update_forces(a1, airspeed, pathAngle - a1)
             else: self.update_forces(a1, airspeed, pathAngle)
@@ -761,6 +766,7 @@ class StaticModel:
         self.update_resultant_force()
         
         while self.force[2] < self.mass * acc:
+            a1 = a2
             a2 += 1
             if fixPitch: self.update_forces(a2, airspeed, pathAngle - a2)
             else: self.update_forces(a2, airspeed, pathAngle)
@@ -769,7 +775,7 @@ class StaticModel:
                 return None
 
         while a2 - a1 > tolerance:
-            test.redraw_model_diagram()
+            self.redraw_model_diagram()
             c = (a1 + a2) / 2
             if fixPitch: self.update_forces(c, airspeed, pathAngle - c)
             else: self.update_forces(c, airspeed, pathAngle)
@@ -786,7 +792,7 @@ class StaticModel:
             
 
 class DynamicWing:
-    def __init__(self, profile, flapx, flapy, flapang, span, chordEq, dihedralEq, sweepEq, twistEq, reflect, x0, y0, z0):
+    def __init__(self, profile, flapx, flapy, flapang, span, chordEq, dihedralEq, sweepEq, twistEq, reflect, inverted, numElements, x0, y0, z0):
         self.profile = profile
         self.flapx = flapx
         self.flapy = flapy
@@ -797,12 +803,15 @@ class DynamicWing:
         self.sweepEq = sweepEq
         self.twistEq = twistEq
         self.reflect = reflect
+        self.inverted = inverted
+        self.numElements = numElements
         self.x0 = x0
         self.y0 = y0
         self.z0 = z0
 
-    def compile(self, numElements, variables):
+    def compile(self, variables):
         elements = []
+        numElements = int(evaluate(self.numElements))
         span = evaluate(self.span, variables)
         for i in range(0, numElements):
             dy = i * span / numElements
@@ -814,12 +823,14 @@ class DynamicWing:
             flapy = evaluate(self.flapy, var)
             flapang = evaluate(self.flapang, var)
             chord = evaluate(self.chordEq, var)
-            x = self.x0 + evaluate(self.sweepEq, var)
-            y = self.y0 + dy
-            z = self.z0 + evaluate(self.dihedralEq, var)
+            x = evaluate(self.x0, var) + evaluate(self.sweepEq, var)
+            y = evaluate(self.y0, var) + dy
+            z = evaluate(self.z0, var) + evaluate(self.dihedralEq, var)
             incidence = evaluate(self.twistEq, var)
-            
-            elements.append(AeroElement(self.profile, chord, incidence, span / numElements, flapx, flapy, flapang, x, y, z))
+
+            element = AeroElement(self.profile, chord, incidence, span / numElements, flapx, flapy, flapang, x, y, z)
+            element.inverted = self.inverted
+            elements.append(element)
             
         return elements
 
@@ -843,15 +854,128 @@ class DynamicModel:
         self.wings = []
         self.masses = []
         self.fig = None
+        self.pitch = 0
+        self.pathAngle = 0
+        self.fixPitch = False
+        self.acc = 0
+        self.airspeed = 0
 
-    def compile(self, elementsPerWing):
+    def compile(self):
         static = StaticModel(fig = self.fig)
         self.fig = static.get_fig()
         for wing in self.wings:
-            static.aeroElements.extend(wing.compile(elementsPerWing, self.variables))
+            static.aeroElements.extend(wing.compile(self.variables))
         for mass in self.masses:
             static.massElements.append(mass.compile(self.variables))
         return static
+
+    def get_variable_value(self, varName):
+        for var in self.variables:
+            if varName == var[0]:
+                return evaluate(var[1], self.variables)
+
+    def set_variable(self, varName, val):
+        for i in range(0, len(self.variables)):
+            if varName == self.variables[i][0]:
+                self.variables[i][1] = str(val)
+                return
+        self.variables.append([varName, str(val)])
+
+    def get_moment(self):
+        static = self.compile()
+        success = True
+        if self.fixPitch:
+            success = static.solve_AoA(self.airspeed, self.pitch, self.acc, fixPitch = True)
+        else:
+            success = static.solve_AoA(self.airspeed, self.pathAngle, self.acc, fixPitch = False)
+        static.update_moment()
+        if success == None:
+            return None
+        return static.moment
+
+    def optimizeVariableForMoment(self, varName, desiredMoment, momentAxis, tolerance = 0.01):
+        negativeCorrelation = False
+        m0 = self.get_moment()[momentAxis]
+        m1 = m0
+        val = self.get_variable_value(varName)
+        delta = 0.1
+        while m1 == m0:
+            delta = delta * 1.5
+            self.set_variable(varName, val+delta)
+            m1 = self.get_moment()[momentAxis]
+            if m1 == None:
+                delta = delta / 10
+
+        v0 = val
+        v1 = val + delta
+        
+        if m1 < m0:
+            negativeCorrelation = True
+            m0, m1 = [m1, m0]
+            v0, v1 = [v1, v0]
+
+        # expanding outer bounds
+        #delta = delta * 20
+        delta = abs(m0 - desiredMoment) * abs((v1-v0) / (m1 - m0))
+        print(delta)
+        delta = delta / 3
+
+        
+
+        while m0 > desiredMoment:
+            m1 = m0
+            v1 = v0
+            if negativeCorrelation:
+                v0 += delta
+            else:
+                v0 -= delta
+            self.set_variable(varName, v0)
+            m0 = self.get_moment()[momentAxis]
+            if m0 == None:
+                return None
+            print(v0, m0)
+
+        print("done v0")
+        print(negativeCorrelation)
+        
+        while m1 < desiredMoment:
+            m0 = m1
+            v0 = v1
+            if negativeCorrelation:
+                v1 -= delta
+            else:
+                v1 += delta
+            self.set_variable(varName, v1)
+            m1 = self.get_moment()[momentAxis]
+            if m1 == None:
+                return None
+            print(v1, m1)
+
+        print("converging")
+        # converging
+        while m1 - m0 > tolerance:
+            v = (v0 + v1) / 2
+            self.set_variable(varName, v)
+            m = self.get_moment()[momentAxis]
+
+            if m > desiredMoment:
+                v1 = v
+                m1 = m
+            elif m < desiredMoment:
+                v0 = v
+                m0 = m
+            else:
+                return v
+
+            print(v, m)
+        
+        self.set_variable(varName, (v0 + v1) / 2)
+        return (v0 + v1) / 2
+            
+            
+            
+            
+        
 
 
 
@@ -861,29 +985,6 @@ class DynamicModel:
 
 # testing plots:
 
-"""
-test = StaticModel()
-
-width = 0.1
-
-test.massElements.append(MassElement(2, -0.1, width*10, 0))
-test.massElements.append(MassElement(2, -0.1, -width*10, 0))
-
-
-for i in range(0, 15):
-    #(name, chord, incidence, width, flapx, flapy, flapang, x, y, z)
-    test.aeroElements.append(AeroElement("NACA4412", 0.4, 0.3*(20-i), width, 0.8, 0.5, 0, 0, (i+0.5)*width, 0))
-    test.aeroElements.append(AeroElement("NACA4412", 0.4, 0.3*(20-i), width, 0.8, 0.5, 0, 0, -(i+0.5)*width, 0))
-
-for i in range(0, 6):
-    a = AeroElement("NACA4412", 0.2, -2, width, 0.8, 0.5, 0, 1, (i+0.5)*width, 0)
-    a.inverted = True
-    test.aeroElements.append(a)
-    a = AeroElement("NACA4412", 0.2, -2, width, 0.8, 0.5, 0, 1, -(i+0.5)*width, 0)
-    a.inverted = True
-    test.aeroElements.append(a)
-"""
-
 # dynamic model test
 
 dynamic = DynamicModel()
@@ -892,24 +993,36 @@ dynamic.variables = [
     ["span", "1.5"],
     ["dihedralRatio", "1/8"],
     ["sweepRatio", "1/3"],
-    ["twist", "5"]
-    ]
+    ["twist", "5"],
+    ["elevator", "0"],
+    ["trim", "-2"]
+]
 
-#                                  profile, flapx, plapy,    flapang,       span,      chordEq,       dihedralEq,           sweepEq,            twistEq,         reflect, x0, y0, z0)
-dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", False, 0, 0.2, 0))
-dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", True, 0, -0.2, 0))
+#                                  profile, flapx, plapy,    flapang,       span,      chordEq,       dihedralEq,           sweepEq,            twistEq,         reflect, inverted, numElements, x0, y0, z0)
+dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", False, False, "15", "0", "0.2", "0"))
+dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", True, False, "15", "0", "-0.2", "0"))
 
-dynamic.masses.append(DynamicMass("1", "0.3", "span/4", "0"))
-dynamic.masses.append(DynamicMass("1", "0.3", "-span/4", "0"))
-
-test = dynamic.compile(30)
-
-test.clear_model_diagram()
-test.display_airfoils()
+dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "elevator", "span/6", "0.3-0.1*y", "0", "0.1*y", "trim", False, True, "5", "1", "0.1", "0"))
+dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "elevator", "span/6", "0.3-0.1*y", "0", "0.1*y", "trim", True, True, "5", "1", "-0.1", "0"))
 
 
+dynamic.masses.append(DynamicMass("1", "0.1", "span/4", "0"))
+dynamic.masses.append(DynamicMass("1", "0.1", "-span/4", "0"))
+
+
+# trim optimization test
+
+dynamic.airspeed = 10
+#dynamic.acc = 1
+#ynamic.pathAngle = 10
+print("Optimal tail trim angle:", dynamic.optimizeVariableForMoment("trim", 0, 0))
+
+"""
 
 # acceleration & AoA convergence tests:
+test = dynamic.compile()
+test.clear_model_diagram()
+test.display_airfoils()
 
 airspeed = 10
 
@@ -918,3 +1031,4 @@ for acc in range(0, 20):
     test.redraw_model_diagram()
     if test.is_stalled():
         break
+"""
