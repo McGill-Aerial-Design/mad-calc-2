@@ -517,6 +517,12 @@ class AeroElement:
             
 
     def update_forces(self, modelIncidence, airspeed):
+        if airspeed == 0:
+            self.lift = 0
+            self.drag = 0
+            self.moment = 0
+            return
+        
         self.lastCalcModelIncidence = modelIncidence
         self.stalled = False
         AoA = modelIncidence + self.incidence
@@ -697,6 +703,9 @@ class StaticModel:
         return maxDim
 
     def update_xfoil_data(self, airspeed):
+        if airspeed == 0:
+            return False
+        
         for element in self.aeroElements:
             element.update_xfoil_data(airspeed)
 
@@ -775,7 +784,7 @@ class StaticModel:
                 return None
 
         while a2 - a1 > tolerance:
-            self.redraw_model_diagram()
+            #self.redraw_model_diagram()
             c = (a1 + a2) / 2
             if fixPitch: self.update_forces(c, airspeed, pathAngle - c)
             else: self.update_forces(c, airspeed, pathAngle)
@@ -789,6 +798,27 @@ class StaticModel:
                 a1 = c
 
         return (a1 + a2) / 2
+
+
+    def graph_x_moment_velocity(self, minimum, maximum, numSteps, pathAngle, acc, label=None, fig=None):
+        if fig == None:
+            fig = plt.figure().add_subplot()
+            fig.set_xlabel("Airspeed - $ms^{-1}$")
+            fig.set_ylabel("X-Axis Moment - $Nm$")
+        velocities = []
+        moments = []
+        for i in range(0, numSteps):
+            v = minimum + i * (maximum-minimum) / numSteps
+            self.solve_AoA(v, pathAngle, acc)
+            self.redraw_model_diagram()
+            if not self.is_stalled():
+                self.update_moment()
+                velocities.append(v)
+                moments.append(self.moment[0])
+
+        fig.scatter(velocities, moments, label=label)
+        plt.show(False)
+            
             
 
 class DynamicWing:
@@ -893,12 +923,16 @@ class DynamicModel:
             return None
         return static.moment
 
-    def optimizeVariableForMoment(self, varName, desiredMoment, momentAxis, tolerance = 0.01):
+    def optimize_variable_for_moment(self, varName, desiredMoment, momentAxis, tolerance = 0.01):
         negativeCorrelation = False
         m0 = self.get_moment()[momentAxis]
         m1 = m0
         val = self.get_variable_value(varName)
         delta = 0.1
+
+        if abs(desiredMoment - m0) < tolerance/2:
+            return m0
+        
         while m1 == m0:
             delta = delta * 1.5
             self.set_variable(varName, val+delta)
@@ -915,10 +949,13 @@ class DynamicModel:
             v0, v1 = [v1, v0]
 
         # expanding outer bounds
-        #delta = delta * 20
-        delta = abs(m0 - desiredMoment) * abs((v1-v0) / (m1 - m0))
-        print(delta)
-        delta = delta / 3
+        
+        #plt.figure() # debugging plot
+        delta = abs( (desiredMoment - m0) * (v1 - v0) / (m1 - m0) )
+        #plt.scatter(v0-delta, desiredMoment, color="orange")
+        #plt.plot([v0-delta, v1], [desiredMoment, m1], color="orange")
+        #print(m1 - m0, v1-v0, delta)
+        delta = delta / 2.5
 
         
 
@@ -933,10 +970,10 @@ class DynamicModel:
             m0 = self.get_moment()[momentAxis]
             if m0 == None:
                 return None
-            print(v0, m0)
+            #print(v0, m0)
 
-        print("done v0")
-        print(negativeCorrelation)
+        #print("done v0")
+        #print(negativeCorrelation)
         
         while m1 < desiredMoment:
             m0 = m1
@@ -949,9 +986,10 @@ class DynamicModel:
             m1 = self.get_moment()[momentAxis]
             if m1 == None:
                 return None
-            print(v1, m1)
+            #print(v1, m1)
+            #plt.scatter(v1, m1, color="red")
 
-        print("converging")
+        #print("converging")
         # converging
         while m1 - m0 > tolerance:
             v = (v0 + v1) / 2
@@ -967,7 +1005,8 @@ class DynamicModel:
             else:
                 return v
 
-            print(v, m)
+            #print(v, m)
+            #plt.scatter(v, m, color="green")
         
         self.set_variable(varName, (v0 + v1) / 2)
         return (v0 + v1) / 2
@@ -1013,16 +1052,17 @@ dynamic.masses.append(DynamicMass("1", "0.1", "-span/4", "0"))
 # trim optimization test
 
 dynamic.airspeed = 10
-#dynamic.acc = 1
-#ynamic.pathAngle = 10
-print("Optimal tail trim angle:", dynamic.optimizeVariableForMoment("trim", 0, 0))
+dynamic.acc = 1
+dynamic.pathAngle = 10
+print("Optimal tail trim angle:", dynamic.optimize_variable_for_moment("trim", 0, 0))
 
-"""
 
 # acceleration & AoA convergence tests:
 test = dynamic.compile()
 test.clear_model_diagram()
 test.display_airfoils()
+
+test.graph_x_moment_velocity(0, 25, 10, 0, 0)
 
 airspeed = 10
 
@@ -1031,4 +1071,4 @@ for acc in range(0, 20):
     test.redraw_model_diagram()
     if test.is_stalled():
         break
-"""
+
