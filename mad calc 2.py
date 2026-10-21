@@ -367,6 +367,11 @@ def add_vectors(vec1, vec2):
         res.append(vec1[i] + vec2[i])
     return res
 
+def str_to_bool(s):
+    if s.upper() in ["TRUE", "YES", "1"]:
+        return True
+    return False
+
 def evaluate(string, variables=None):
     if variables != None:
         changed = True
@@ -816,8 +821,9 @@ class StaticModel:
                 velocities.append(v)
                 moments.append(self.moment[0])
 
+        fig.plot([minimum, maximum], [0, 0], color="black")
         fig.scatter(velocities, moments, label=label)
-        plt.show(False)
+        plt.show(block=False)
             
             
 
@@ -889,6 +895,102 @@ class DynamicModel:
         self.fixPitch = False
         self.acc = 0
         self.airspeed = 0
+
+    def load_madm2(self, path):
+        file = open(path, "r")
+        chunks = file.read().split("}")
+        file.close()
+        for chunk in chunks:
+            if "{" not in chunk:
+                continue
+            chunkType, chunk = chunk.split("{")
+            chunk = chunk.split("\n")
+            chunkType = chunkType.strip()
+            for i in range(0, len(chunk)):
+                if "#" in chunk[i]:
+                    chunk[i] = chunk[i][:chunk[i].find("#")]
+
+            if chunkType == "variables":
+                for line in chunk:
+                    if "=" in line:
+                        line = line.split("=")
+                        self.variables.append([line[0].strip(), line[1].strip()])
+
+            elif chunkType == "wing":
+                profile = ""
+                flapx = "0"
+                flapy = "0"
+                flapang = "0"
+                span = "0"
+                chord = "0"
+                dihedral = "0"
+                sweep = "0"
+                twist = "0"
+                reflect = False
+                inverted = False
+                numElements = "10"
+                x0 = "0"
+                y0 = "0"
+                z0 = "0"
+                
+                for line in chunk:
+                    if "=" in line:
+                        line = line.split("=")
+                        line[0] = line[0].strip().lower()
+                        line[1] = line[1].strip()
+                        if line[0] == "profile":
+                            profile = line[1]
+                        elif line[0] == "flaphinge":
+                            x, y = line[1].split(",")
+                            flapx = x.strip()
+                            flapy = y.strip()
+                        elif line[0] == "flapang":
+                            flapang = line[1]
+                        elif line[0] == "span":
+                            span = line[1]
+                        elif line[0] == "chord":
+                            chord = line[1]
+                        elif line[0] == "dihedral":
+                            dihedral = line[1]
+                        elif line[0] == "sweep":
+                            sweep = line[1]
+                        elif line[0] == "twist":
+                            twist = line[1]
+                        elif line[0] == "reflect":
+                            reflect = str_to_bool(line[1])
+                        elif line[0] == "inverted":
+                            inverted = str_to_bool(line[1])
+                        elif line[0] == "numelements":
+                            numElements = line[1]
+                        elif line[0] == "position":
+                            x0, y0, z0 = line[1].split(",")
+                            x0 = x0.strip()
+                            y0 = y0.strip()
+                            z0 = z0.strip()
+                
+                self.wings.append(DynamicWing(profile, flapx, flapy, flapang, span, chord, dihedral, sweep, twist, reflect, inverted, numElements, x0, y0, z0))
+
+            elif chunkType == "mass":
+                mass = "0"
+                x = "0"
+                y = "0"
+                x = "0"
+                for line in chunk:
+                    if "=" in line:
+                        line = line.split("=")
+                        line[0] = line[0].strip().lower()
+                        line[1] = line[1].strip()
+                        if line[0] == "mass":
+                            mass = line[1]
+                        if line[0] == "position":
+                            x, y, z = line[1].split(",")
+                            x = x.strip()
+                            y = y.strip()
+                            z = z.strip()
+
+                self.masses.append(DynamicMass(mass, x, y, z))
+                
+                
 
     def compile(self):
         static = StaticModel(fig = self.fig)
@@ -967,9 +1069,10 @@ class DynamicModel:
             else:
                 v0 -= delta
             self.set_variable(varName, v0)
-            m0 = self.get_moment()[momentAxis]
+            m0 = self.get_moment()
             if m0 == None:
                 return None
+            m0 = m0[momentAxis]
             #print(v0, m0)
 
         #print("done v0")
@@ -983,9 +1086,10 @@ class DynamicModel:
             else:
                 v1 += delta
             self.set_variable(varName, v1)
-            m1 = self.get_moment()[momentAxis]
+            m1 = self.get_moment()
             if m1 == None:
                 return None
+            m1 = m1[momentAxis]
             #print(v1, m1)
             #plt.scatter(v1, m1, color="red")
 
@@ -1028,6 +1132,7 @@ class DynamicModel:
 
 dynamic = DynamicModel()
 
+"""
 dynamic.variables = [
     ["span", "1.5"],
     ["dihedralRatio", "1/8"],
@@ -1037,7 +1142,7 @@ dynamic.variables = [
     ["trim", "-2"]
 ]
 
-#                                  profile, flapx, plapy,    flapang,       span,      chordEq,       dihedralEq,           sweepEq,            twistEq,         reflect, inverted, numElements, x0, y0, z0)
+#                                  profile, flapx, flapy,    flapang,       span,      chordEq,       dihedralEq,           sweepEq,            twistEq,         reflect, inverted, numElements, x0, y0, z0)
 dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", False, False, "15", "0", "0.2", "0"))
 dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", True, False, "15", "0", "-0.2", "0"))
 
@@ -1047,7 +1152,12 @@ dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "elevator", "span/6",
 
 dynamic.masses.append(DynamicMass("1", "0.1", "span/4", "0"))
 dynamic.masses.append(DynamicMass("1", "0.1", "-span/4", "0"))
+"""
+dynamic.load_madm2("models/test.madm2")
 
+
+#import sys
+#sys.exit()
 
 # trim optimization test
 
@@ -1062,7 +1172,7 @@ test = dynamic.compile()
 test.clear_model_diagram()
 test.display_airfoils()
 
-test.graph_x_moment_velocity(0, 25, 10, 0, 0)
+test.graph_x_moment_velocity(0, 25, 50, 0, 0)
 
 airspeed = 10
 
