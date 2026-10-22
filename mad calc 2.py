@@ -3,6 +3,7 @@ from matplotlib import pyplot as plt
 import math
 import numpy as np
 from pathlib import Path
+import threading
 
 # axis dirextions:
 # positive x: towards tail
@@ -27,6 +28,7 @@ CM_MULTIPLIER = 1 / 1.5
 XFOIL_FAIL_TOLERANCE = 2
 REYNOLDS_MAX_INTERPOLATION_RATIO = 1.2
 MACH_INTERPOLATION_DISTANCE = 0.1
+MAX_THREADS = 20
 
 ARROW_SIZE_MULTIPLIER = 0.1
 
@@ -178,6 +180,20 @@ def get_xfoil_data_no_interpolation(name, flapx, flapy, flapang, reynolds, mach)
     except:
         return xFoil_generate_csv_selig(name, reynolds, mach)
 
+def bulk_run_xfoil(name, flapx, flapy, flapangs, reynoldsList, machs):
+    threads = []
+    for flapang in flapangs:
+        for reynolds in reynoldsList:
+            if reynolds != 0:
+                for mach in machs:
+                    threads.append(threading.Thread(target=get_xfoil_data_no_interpolation, args=(name, flapx, flapy, flapang, reynolds, mach,)))
+
+                    if len(threads) >= MAX_THREADS:
+                        for thread in threads:
+                            thread.start()
+                        for thread in threads:
+                            thread.join()
+                        threads = []
 
 
 def interpolate_xfoil(data1, data2, ratio):
@@ -393,6 +409,9 @@ def evaluate(string, variables=None):
     if "**" in string:
         string = string.replace("**", "^")
 
+    if "--" in string:
+        string = string.replace("--", "")
+
     if string == "":
         return 0
     
@@ -592,6 +611,7 @@ class AeroElement:
         mach = get_mach(airspeed)
         reynolds = get_reynolds(self.chord, airspeed)
         self.xfoilData = get_xfoil_data(self.name, self.flapx, self.flapy, self.flapang, reynolds, mach, self.availableFlapAngles)
+
         
 
 class MassElement:
@@ -806,23 +826,35 @@ class StaticModel:
 
 
     def graph_x_moment_velocity(self, minimum, maximum, numSteps, pathAngle, acc, label=None, fig=None):
+        lowest = maximum
+        highest = minimum
         if fig == None:
             fig = plt.figure().add_subplot()
             fig.set_xlabel("Airspeed - $ms^{-1}$")
             fig.set_ylabel("X-Axis Moment - $Nm$")
+
+        tryVelocities = []
+        for i in range(0, numSteps):
+            tryVelocities.append(minimum + i * (maximum-minimum) / numSteps)
+        
         velocities = []
         moments = []
-        for i in range(0, numSteps):
-            v = minimum + i * (maximum-minimum) / numSteps
+        for v in tryVelocities:
             self.solve_AoA(v, pathAngle, acc)
             self.redraw_model_diagram()
             if not self.is_stalled():
                 self.update_moment()
                 velocities.append(v)
                 moments.append(self.moment[0])
+                if v < lowest:
+                    lowest = v
+                if v > highest:
+                    highest = v
 
-        fig.plot([minimum, maximum], [0, 0], color="black")
-        fig.scatter(velocities, moments, label=label)
+        fig.plot([lowest, highest], [0, 0], color="black")
+        fig.scatter(velocities, moments, label=label, marker=".")
+        if label != None:
+            fig.legend()
         plt.show(block=False)
             
             
@@ -859,6 +891,8 @@ class DynamicWing:
             flapy = evaluate(self.flapy, var)
             flapang = evaluate(self.flapang, var)
             chord = evaluate(self.chordEq, var)
+            #if chord == 0.3:
+            #    print("dynamic flapang:", self.flapang, flapang)
             x = evaluate(self.x0, var) + evaluate(self.sweepEq, var)
             y = evaluate(self.y0, var) + dy
             z = evaluate(self.z0, var) + evaluate(self.dihedralEq, var)
@@ -1051,15 +1085,8 @@ class DynamicModel:
             v0, v1 = [v1, v0]
 
         # expanding outer bounds
-        
-        #plt.figure() # debugging plot
         delta = abs( (desiredMoment - m0) * (v1 - v0) / (m1 - m0) )
-        #plt.scatter(v0-delta, desiredMoment, color="orange")
-        #plt.plot([v0-delta, v1], [desiredMoment, m1], color="orange")
-        #print(m1 - m0, v1-v0, delta)
         delta = delta / 2.5
-
-        
 
         while m0 > desiredMoment:
             m1 = m0
@@ -1073,10 +1100,6 @@ class DynamicModel:
             if m0 == None:
                 return None
             m0 = m0[momentAxis]
-            #print(v0, m0)
-
-        #print("done v0")
-        #print(negativeCorrelation)
         
         while m1 < desiredMoment:
             m0 = m1
@@ -1090,11 +1113,8 @@ class DynamicModel:
             if m1 == None:
                 return None
             m1 = m1[momentAxis]
-            #print(v1, m1)
-            #plt.scatter(v1, m1, color="red")
 
-        #print("converging")
-        # converging
+        #converging
         while m1 - m0 > tolerance:
             v = (v0 + v1) / 2
             self.set_variable(varName, v)
@@ -1108,9 +1128,6 @@ class DynamicModel:
                 m0 = m
             else:
                 return v
-
-            #print(v, m)
-            #plt.scatter(v, m, color="green")
         
         self.set_variable(varName, (v0 + v1) / 2)
         return (v0 + v1) / 2
@@ -1119,8 +1136,10 @@ class DynamicModel:
             
             
         
+# xfoil in threading: (not working)
 
-
+#reynoldsList = get_already_calculated_reynolds("NACA4412", 0.8, 0.5, 0, 0)
+#bulk_run_xfoil("NACA4412", 0.8, 0.5, [-30, -20, -10, 10, 20, 30], reynoldsList, [0, 0.1])
 
 
 
@@ -1128,36 +1147,10 @@ class DynamicModel:
 
 # testing plots:
 
-# dynamic model test
-
 dynamic = DynamicModel()
-
-"""
-dynamic.variables = [
-    ["span", "1.5"],
-    ["dihedralRatio", "1/8"],
-    ["sweepRatio", "1/3"],
-    ["twist", "5"],
-    ["elevator", "0"],
-    ["trim", "-2"]
-]
-
-#                                  profile, flapx, flapy,    flapang,       span,      chordEq,       dihedralEq,           sweepEq,            twistEq,         reflect, inverted, numElements, x0, y0, z0)
-dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", False, False, "15", "0", "0.2", "0"))
-dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "-y/(span/2)*20", "span/2", "0.5-0.1*y", "dihedralRatio*y", "sweepRatio*y", "(span/2-y)/(span/2)*twist", True, False, "15", "0", "-0.2", "0"))
-
-dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "elevator", "span/6", "0.3-0.1*y", "0", "0.1*y", "trim", False, True, "5", "1", "0.1", "0"))
-dynamic.wings.append(DynamicWing("NACA4412", "0.8", "0.5", "elevator", "span/6", "0.3-0.1*y", "0", "0.1*y", "trim", True, True, "5", "1", "-0.1", "0"))
-
-
-dynamic.masses.append(DynamicMass("1", "0.1", "span/4", "0"))
-dynamic.masses.append(DynamicMass("1", "0.1", "-span/4", "0"))
-"""
 dynamic.load_madm2("models/test.madm2")
 
 
-#import sys
-#sys.exit()
 
 # trim optimization test
 
@@ -1167,13 +1160,25 @@ dynamic.pathAngle = 10
 print("Optimal tail trim angle:", dynamic.optimize_variable_for_moment("trim", 0, 0))
 
 
-# acceleration & AoA convergence tests:
 test = dynamic.compile()
 test.clear_model_diagram()
 test.display_airfoils()
 
-test.graph_x_moment_velocity(0, 25, 50, 0, 0)
 
+
+# moment - velocity graph test:
+
+fig = plt.figure().add_subplot()
+fig.set_xlabel("Airspeed - $ms^{-1}$")
+fig.set_ylabel("X-Axis Moment - $Nm$")
+
+for p in [-30, -20, -10, 0, 10, 20, 30]:
+    dynamic.set_variable("elevator", str(p))
+    dynamic.compile().graph_x_moment_velocity(0, 20, 40, 0, 0, "elevator = " + str(p) + "°", fig)
+
+
+
+# acceleration & AoA convergence tests:
 airspeed = 10
 
 for acc in range(0, 20):
